@@ -311,6 +311,7 @@ if __name__ == "__main__":
         in1_cb = "in1_cb"
         out_cb = "out_cb"
 
+        cb_reserve_back(out_cb, out_block_size)
         for M in range(M_block):
             for N in range(N_block):
                 for K in range(K_block):
@@ -325,24 +326,25 @@ if __name__ == "__main__":
 
                     # Copy partial tiles from previous K block
                     tile_regs_acquire()
+                    block_offset = M * (N_block * N_block_size) + (N * N_block_size)
                     if K != 0:
-                        cb_wait_front(out_cb, out_block_size)
+                        # cb_wait_front(out_cb, out_block_size)
                         for i in range(out_block_size):
-                            copy_tile(out_cb, i, i)
-                        cb_pop_front(out_cb, out_block_size)
+                            # stall wait
+                            copy_tile(out_cb, i + block_offset, i)
+                        # cb_pop_front(out_cb, out_block_size)
 
                     matmul_block(in0_cb, in1_cb)
 
                     tile_regs_commit()
                     tile_regs_wait()
-
-                    cb_reserve_back(out_cb, out_block_size)
+                    
                     for i in range(out_block_size):
-                        pack_tile(i, out_cb, i)
-                    cb_push_back(out_cb, out_block_size)
+                        pack_tile(i, out_cb, i + block_offset)
                     tile_regs_release()
+        cb_push_back(out_cb, out_block_size)
 
-    kernel()
+    kernel0()
 
     # Print all simulation states
     print("\nSimulation state history:")
