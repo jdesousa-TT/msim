@@ -5,16 +5,16 @@ from copy import deepcopy
 class DestRegister:
     def __init__(self, size: int):
         self.size = size
-        self.buffer = np.zeros(size, dtype=object)
+        self.buffer = np.full(size, "", dtype=np.dtypes.StringDType())
     def __repr__(self):
         return (f"DestRegister(size={self.size}, buffer={self.buffer})")
     def clear(self):
-        self.buffer = np.zeros(self.size, dtype=object)
+        self.buffer = np.full(self.size, "", dtype=np.dtypes.StringDType())
 
 class CircularBuffer:
     def __init__(self, size: int):
         self.size = size
-        self.buffer = np.zeros(size, dtype=object)
+        self.buffer = np.full(size, "", dtype=np.dtypes.StringDType())
         self.read_ptr = 0
         self.write_ptr = 0
     def __repr__(self):
@@ -72,7 +72,41 @@ class MatmulState:
         
         # Track the operation that created this state
         self.operation = operation
+        
+        # verif
+        #import pdb; pdb.set_trace()
+        self.golden = np.full((self.M, self.N, self.K), "", dtype=np.dtypes.StringDType())
+        self.golden_check = np.full((self.M, self.N, self.K), False, dtype=bool)
+        for m in range(self.M):
+            for k in range(self.K):
+                for n in range(self.N):
+                    self.golden[m][n][k] = str(self.in0[m][k]) + str(self.in1[k][n])
+                    #print(str(self.in0[m][k]) + str(self.in1[k][n]))
+        
+        self.golden = self.golden.reshape((self.M*self.N, self.K))
+        self.golden = [sorted(i) for i in self.golden]
+        # for m in range(self.M):
+        #    for n in range(self.N):
+        #        print(f"({self.golden[m][n]}), ")
 
+    def generate_output_checks(self):
+        sorted_output = [sorted([j.strip() for j in i.split("+")]) for i in self.out_cb.buffer]
+        golden_mn = np.array(self.golden, dtype=np.dtypes.StringDType()).reshape((self.M, self.N, self.K))
+        max_partials = max([len(k) for k in sorted_output])
+        sorted_output = [k + [''] * (max_partials - len(k)) for k in sorted_output]
+        output_mn = np.array(sorted_output, dtype=np.dtypes.StringDType()).reshape((self.M, self.N, max_partials))
+        if max_partials != self.K:
+            return
+        self.golden_check = output_mn == golden_mn
+        self.golden_check = np.logical_and.reduce(self.golden_check, axis=2, initial=True)
+        
+        print(self.golden_check)
+
+
+    def verify(self):
+        self.generate_output_checks()
+        return bool(self.golden_check.all())
+    
     def copy(self):
         return deepcopy(self)
 
@@ -312,9 +346,10 @@ if __name__ == "__main__":
         out_cb = "out_cb"
 
         cb_reserve_back(out_cb, out_block_size)
-        for M in range(M_block):
-            for N in range(N_block):
-                for K in range(K_block):
+        for K in range(K_block):
+            for M in range(M_block):
+                for N in range(N_block):
+                    
                     # Compute starting indices for this block
                     m_start = M * M_block_size
                     n_start = N * N_block_size
@@ -328,11 +363,11 @@ if __name__ == "__main__":
                     tile_regs_acquire()
                     block_offset = M * (N_block * N_block_size) + (N * N_block_size)
                     if K != 0:
-                        # cb_wait_front(out_cb, out_block_size)
+                        #cb_wait_front(out_cb, out_block_size)
                         for i in range(out_block_size):
                             # stall wait
                             copy_tile(out_cb, i + block_offset, i)
-                        # cb_pop_front(out_cb, out_block_size)
+                        #cb_pop_front(out_cb, out_block_size)
 
                     matmul_block(in0_cb, in1_cb)
 
@@ -342,9 +377,12 @@ if __name__ == "__main__":
                     for i in range(out_block_size):
                         pack_tile(i, out_cb, i + block_offset)
                     tile_regs_release()
+                    
         cb_push_back(out_cb, out_block_size)
 
     kernel0()
+
+    assert(sim_states[-1].verify(), "Golden failed")
 
     # Print all simulation states
     print("\nSimulation state history:")
