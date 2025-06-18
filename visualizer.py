@@ -17,10 +17,10 @@ class StateVisualizer:
         self.current_highlighted_cell = None
         
         # Create figure and subplots
-        self.fig = plt.figure(figsize=(14, 10))
+        self.fig = plt.figure(figsize=(14, 12))
         
-        # Create a 3-row, 2-column grid
-        self.gs = gridspec.GridSpec(3, 2, figure=self.fig)
+        # Create a 4-row, 2-column grid (output tensor on its own row)
+        self.gs = gridspec.GridSpec(4, 2, figure=self.fig, height_ratios=[1, 1, 1, 1.2])
         
         # Input tensors on top row
         self.ax_in0 = self.fig.add_subplot(self.gs[0, 0])
@@ -30,9 +30,12 @@ class StateVisualizer:
         self.ax_in0_cb = self.fig.add_subplot(self.gs[1, 0])
         self.ax_in1_cb = self.fig.add_subplot(self.gs[1, 1])
         
-        # Output circular buffer and destination register on bottom row with equal width
+        # Output circular buffer and destination register on third row with equal width
         self.ax_out_cb = self.fig.add_subplot(self.gs[2, 0])
         self.ax_dest_reg = self.fig.add_subplot(self.gs[2, 1])
+        
+        # Output tensor on bottom row, spanning both columns
+        self.ax_out_tensor = self.fig.add_subplot(self.gs[3, :])
         
         # Navigation buttons
         self.ax_prev = plt.axes([0.3, 0.01, 0.1, 0.05])
@@ -85,7 +88,7 @@ class StateVisualizer:
         # Clear all axes
         for ax in [self.ax_in0, self.ax_in1, 
                   self.ax_in0_cb, self.ax_in1_cb, self.ax_out_cb, 
-                  self.ax_dest_reg]:
+                  self.ax_dest_reg, self.ax_out_tensor]:
             ax.clear()
             
         # Clear any existing highlights
@@ -121,6 +124,11 @@ class StateVisualizer:
         
         # Plot destination register
         self._plot_dest_register(self.ax_dest_reg, state.dest_register)
+        
+        # Plot output tensor using data from output circular buffer
+        self._plot_output_tensor(self.ax_out_tensor, state)
+        # Store cell geometry for hit-testing in output tensor
+        self.ax_out_tensor.out_tensor_cells = self._output_tensor_cells(state)
         
         # Update state counter
         self.state_text.set_text(f"State: {self.current_idx}/{self.max_idx}")
@@ -319,7 +327,6 @@ class StateVisualizer:
                     cell_value = cell['value']
                     cell_id = f"out_cb_{i}"
                     break
-                    
         # Check if clicking on destination register
         elif event.inaxes == self.ax_dest_reg and hasattr(self.ax_dest_reg, 'dest_cells'):
             for i, cell in enumerate(self.ax_dest_reg.dest_cells):
@@ -328,6 +335,15 @@ class StateVisualizer:
                     found_cell = True
                     cell_value = cell['value']
                     cell_id = f"dest_reg_{i}"
+                    break
+        # Check if clicking on output tensor
+        elif event.inaxes == self.ax_out_tensor and hasattr(self.ax_out_tensor, 'out_tensor_cells'):
+            for i, cell in enumerate(self.ax_out_tensor.out_tensor_cells):
+                if (cell['x'] <= event.xdata < cell['x'] + cell['width'] and
+                    cell['y'] <= event.ydata < cell['y'] + cell['height']):
+                    found_cell = True
+                    cell_value = cell['value']
+                    cell_id = f"out_tensor_{i}"
                     break
         
         # Clear highlights if clicking on a different cell or outside any cell
@@ -405,8 +421,63 @@ class StateVisualizer:
     
     def show(self):
         # Adjust layout without using tight_layout to avoid warnings
-        self.fig.subplots_adjust(left=0.05, right=0.95, bottom=0.08, top=0.92, wspace=0.2, hspace=0.3)
+        self.fig.subplots_adjust(left=0.05, right=0.95, bottom=0.08, top=0.92, wspace=0.2, hspace=0.4)
         plt.show()
+
+    def _plot_output_tensor(self, ax, state):
+        """Plot the output tensor using data from the output circular buffer, with highlight support."""
+        M, N = state.output_shape
+        output_tensor = np.zeros((M, N), dtype=object)
+        # Fill output tensor from output cb (row-major order)
+        for i in range(state.out_cb.size):
+            if state.out_cb.buffer[i] is not None and state.out_cb.buffer[i] != 0:
+                row = i // N
+                col = i % N
+                if row < M and col < N:
+                    output_tensor[row, col] = state.out_cb.buffer[i]
+        # Draw grid
+        ax.set_xlim(0, N)
+        ax.set_ylim(0, M)
+        ax.set_title("Output Tensor")
+        ax.set_xticks([])
+        ax.set_yticks([])
+        for i in range(M+1):
+            ax.axhline(i, color='gray', linewidth=0.5)
+        for j in range(N+1):
+            ax.axvline(j, color='gray', linewidth=0.5)
+        # Cell highlight if needed
+        if hasattr(self, 'current_highlighted_cell') and self.current_highlighted_cell and self.current_highlighted_cell.startswith('out_tensor_'):
+            idx = int(self.current_highlighted_cell.split('_')[-1])
+            row = idx // N
+            col = idx % N
+            rect = plt.Rectangle((col, M - row - 1), 1, 1, fill=True, alpha=0.35, facecolor='orange', zorder=1)
+            ax.add_patch(rect)
+            self.highlight_rects.append(rect)
+        # Cell text
+        for i in range(M):
+            for j in range(N):
+                val = output_tensor[i, j]
+                if val is not None and val != 0:
+                    val_str = str(val)
+                    ax.text(j + 0.5, M - i - 0.5, val_str, ha='center', va='center', fontsize=8, wrap=True)
+    
+    def _output_tensor_cells(self, state):
+        """Return a list of dicts for output tensor cell hit-testing."""
+        M, N = state.output_shape
+        cells = []
+        output_tensor = np.zeros((M, N), dtype=object)
+        for i in range(state.out_cb.size):
+            if state.out_cb.buffer[i] is not None and state.out_cb.buffer[i] != 0:
+                row = i // N
+                col = i % N
+                if row < M and col < N:
+                    output_tensor[row, col] = state.out_cb.buffer[i]
+        for i in range(M):
+            for j in range(N):
+                val = output_tensor[i, j]
+                cells.append({'x': j, 'y': M - i - 1, 'width': 1, 'height': 1, 'value': str(val)})
+        return cells
+
 
 
 def visualize_states(states):
