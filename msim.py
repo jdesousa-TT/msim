@@ -8,6 +8,8 @@ class DestRegister:
         self.buffer = np.zeros(size, dtype=object)
     def __repr__(self):
         return (f"DestRegister(size={self.size}, buffer={self.buffer})")
+    def clear(self):
+        self.buffer = np.zeros(self.size, dtype=object)
 
 class CircularBuffer:
     def __init__(self, size: int):
@@ -114,7 +116,7 @@ if __name__ == "__main__":
     dest_register_size = args.dest_size
 
     # Initialize the simulation state
-    sim_states = [MatmulState((init_M, init_K), (init_K, init_N), args.bm, args.bn, args.bk, args.dest_size, "initial_state")]
+    sim_states = [MatmulState((init_M, init_K), (init_K, init_N), M_block, N_block, K_block, dest_register_size, "initial_state")]
 
     print("Initialized state:\n", sim_states[0])
 
@@ -267,7 +269,44 @@ if __name__ == "__main__":
     def save_state(state: MatmulState):
         sim_states.append(state)
 
-    def kernel():
+    # --- Tile register operations ---
+    def tile_regs_op_wrapper(op_fn, op_name, *args, **kwargs):
+        prev_state = sim_states[-1]
+        new_state = prev_state.copy()
+        new_state.operation = op_name
+        op_fn(new_state, *args, **kwargs)
+        save_state(new_state)
+        return new_state
+        
+    def tile_regs_acquire_impl(state):
+        # Implementation to be provided by user
+        pass
+        
+    def tile_regs_acquire():
+        return tile_regs_op_wrapper(tile_regs_acquire_impl, "tile_regs_acquire()")
+
+    def tile_regs_commit_impl(state):
+        # Implementation to be provided by user
+        pass
+        
+    def tile_regs_commit():
+        return tile_regs_op_wrapper(tile_regs_commit_impl, "tile_regs_commit()")
+
+    def tile_regs_wait_impl(state):
+        # Implementation to be provided by user
+        pass
+        
+    def tile_regs_wait():
+        return tile_regs_op_wrapper(tile_regs_wait_impl, "tile_regs_wait()")
+
+    def tile_regs_release_impl(state):
+        state.dest_register.clear()
+        pass
+        
+    def tile_regs_release():
+        return tile_regs_op_wrapper(tile_regs_release_impl, "tile_regs_release()")
+
+    def kernel0():
         in0_cb = "in0_cb"
         in1_cb = "in1_cb"
         out_cb = "out_cb"
@@ -282,9 +321,10 @@ if __name__ == "__main__":
 
                     # Load tiles for this block into buffers
                     load_in0_tiles(m_start, k_start)
-                    load_in1_tiles(k_start, n_start)
+                    load_in1_tiles(k_start, n_start) # sim datamovement
 
                     # Copy partial tiles from previous K block
+                    tile_regs_acquire()
                     if K != 0:
                         cb_wait_front(out_cb, out_block_size)
                         for i in range(out_block_size):
@@ -293,10 +333,14 @@ if __name__ == "__main__":
 
                     matmul_block(in0_cb, in1_cb)
 
+                    tile_regs_commit()
+                    tile_regs_wait()
+
                     cb_reserve_back(out_cb, out_block_size)
                     for i in range(out_block_size):
                         pack_tile(i, out_cb, i)
                     cb_push_back(out_cb, out_block_size)
+                    tile_regs_release()
 
     kernel()
 
