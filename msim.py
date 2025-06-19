@@ -90,13 +90,27 @@ class MatmulState:
         #        print(f"({self.golden[m][n]}), ")
 
     def generate_output_checks(self):
+        def pad_dim2(tensor, target_length, pad_value=0):
+            """
+            Pads axis=2 of a rank-3 NumPy tensor to `target_length`.
+            """
+            if tensor.shape[2] >= target_length:
+                return tensor[:, :, :target_length]
+            
+            pad_width = ((0, 0), (0, 0), (0, target_length - tensor.shape[2]))
+            return np.pad(tensor, pad_width, mode='constant', constant_values=pad_value)
+            
         sorted_output = [sorted([j.strip() for j in i.split("+")]) for i in self.out_cb.buffer]
         golden_mn = np.array(self.golden, dtype=np.dtypes.StringDType()).reshape((self.M, self.N, self.K))
         max_partials = max([len(k) for k in sorted_output])
         sorted_output = [k + [''] * (max_partials - len(k)) for k in sorted_output]
         output_mn = np.array(sorted_output, dtype=np.dtypes.StringDType()).reshape((self.M, self.N, max_partials))
         if max_partials != self.K:
-            return
+            max_partials = max([len(k) for k in sorted_output])
+            max_k = max(max_partials, self.K)
+            golden_mn = pad_dim2(golden_mn, max_k, "")
+            output_mn = pad_dim2(output_mn, max_k, "")
+
         self.golden_check = output_mn == golden_mn
         self.golden_check = np.logical_and.reduce(self.golden_check, axis=2, initial=True)
         
@@ -252,7 +266,7 @@ if __name__ == "__main__":
                     # Get tile values as strings
                     tile0 = str(in0_cb.buffer[in0_idx])
                     tile1 = str(in1_cb.buffer[in1_idx])
-                    acc += tile0 + tile1  # e.g. '1a'
+                    acc += tile0 + tile1  if acc == "" else " + " + tile0 + tile1
                 dest_idx = m * N_block_size + n
                 dest_reg.buffer[dest_idx] = str(dest_reg.buffer[dest_idx]) + " + " + acc if dest_reg.buffer[dest_idx] else acc
 
@@ -379,10 +393,148 @@ if __name__ == "__main__":
                     tile_regs_release()
                     
         cb_push_back(out_cb, out_block_size)
+    """
+    1. 6 interchanges
+    2. output full CB entry, streaming complete blocks, or dest sized entries
+    3. full input reuse per interhange or no input reuse
+    4. Attempt all with guards on innermost loop
+    - [This should already be covered in point 2] couple with output streaming
+    """
+    def MNK_destCB_noreuse():
+        in0_cb = "in0_cb"
+        in1_cb = "in1_cb"
+        out_cb = "out_cb"
 
+        for M in range(M_block):
+            for N in range(N_block):
+                for K in range(K_block):
+                    
+                    # Compute starting indices for this block
+                    m_start = M * M_block_size
+                    n_start = N * N_block_size
+                    k_start = K * K_block_size
+
+                    # Load tiles for this block into buffers
+                    load_in0_tiles(m_start, k_start)
+                    load_in1_tiles(k_start, n_start)
+
+                    cb_reserve_back(out_cb, out_block_size)
+
+                    # Copy partial tiles from previous K block
+                    tile_regs_acquire()
+                    block_offset = M * (N_block * N_block_size) + (N * N_block_size)
+                    if K != 0:
+                        cb_wait_front(out_cb, out_block_size)
+                        for i in range(out_block_size):
+                            # stall wait
+                            copy_tile(out_cb, i + block_offset, i)
+                        cb_pop_front(out_cb, out_block_size)
+
+                    matmul_block(in0_cb, in1_cb)
+
+                    tile_regs_commit()
+                    tile_regs_wait()
+                    
+                    for i in range(out_block_size):
+                        pack_tile(i, out_cb, i + block_offset)
+                    
+                    cb_push_back(out_cb, out_block_size)
+
+                    tile_regs_release()
+                    
+    def MKN_destCB_noreuse():
+        in0_cb = "in0_cb"
+        in1_cb = "in1_cb"
+        out_cb = "out_cb"
+
+        for M in range(M_block):
+            for K in range(K_block):
+                for N in range(N_block):
+                    
+                    # Compute starting indices for this block
+                    m_start = M * M_block_size
+                    n_start = N * N_block_size
+                    k_start = K * K_block_size
+
+                    # Load tiles for this block into buffers
+                    load_in0_tiles(m_start, k_start)
+                    load_in1_tiles(k_start, n_start)
+
+                    cb_reserve_back(out_cb, out_block_size)
+
+                    # Copy partial tiles from previous K block
+                    tile_regs_acquire()
+                    block_offset = M * (N_block * N_block_size) + (N * N_block_size)
+                    if K != 0:
+                        cb_wait_front(out_cb, out_block_size)
+                        for i in range(out_block_size):
+                            # stall wait
+                            copy_tile(out_cb, i + block_offset, i)
+                        cb_pop_front(out_cb, out_block_size)
+
+                    matmul_block(in0_cb, in1_cb)
+
+                    tile_regs_commit()
+                    tile_regs_wait()
+                    
+                    for i in range(out_block_size):
+                        pack_tile(i, out_cb, i + block_offset)
+                    
+                    cb_push_back(out_cb, out_block_size)
+
+                    tile_regs_release()
+    def KMN_destCB_noreuse():
+        in0_cb = "in0_cb"
+        in1_cb = "in1_cb"
+        out_cb = "out_cb"
+
+        for K in range(K_block):
+            for M in range(M_block):
+                for N in range(N_block):
+                    
+                    # Compute starting indices for this block
+                    m_start = M * M_block_size
+                    n_start = N * N_block_size
+                    k_start = K * K_block_size
+
+                    # Load tiles for this block into buffers
+                    load_in0_tiles(m_start, k_start)
+                    load_in1_tiles(k_start, n_start)
+
+                    cb_reserve_back(out_cb, out_block_size)
+
+                    # Copy partial tiles from previous K block
+                    tile_regs_acquire()
+                    block_offset = M * (N_block * N_block_size) + (N * N_block_size)
+                    if K != 0:
+                        cb_wait_front(out_cb, out_block_size)
+                        for i in range(out_block_size):
+                            # stall wait
+                            copy_tile(out_cb, i + block_offset, i)
+                        cb_pop_front(out_cb, out_block_size)
+
+                    matmul_block(in0_cb, in1_cb)
+
+                    tile_regs_commit()
+                    tile_regs_wait()
+                    
+                    for i in range(out_block_size):
+                        pack_tile(i, out_cb, i + block_offset)
+                    
+                    cb_push_back(out_cb, out_block_size)
+
+                    tile_regs_release()
+    """
+    Output Blocks can only be pushed after K (reduction dim) is fully complete
+    """
     kernel0()
-
-    assert(sim_states[-1].verify(), "Golden failed")
+    #MNK_destCB_noreuse()
+    #MKN_destCB_noreuse()
+    #import pdb; pdb.set_trace()
+    
+    sim_states[-1].generate_output_checks()
+    assert sim_states[-1].verify(), "Golden failed"
+    
 
     # Print all simulation states
     print("\nSimulation state history:")
